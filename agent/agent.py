@@ -1,9 +1,12 @@
 import os
-from openai import AsyncOpenAI 
+import csv
+from datetime import datetime
 from dotenv import load_dotenv
 
+from openai import AsyncOpenAI
 from livekit import agents
 from livekit.agents import AgentSession, Agent, RoomInputOptions
+from livekit.agents import metrics, MetricsCollectedEvent
 from livekit.plugins import (
     openai as livekit_openai,
     cartesia,
@@ -12,10 +15,13 @@ from livekit.plugins import (
     silero,
 )
 from livekit.plugins.turn_detector.multilingual import MultilingualModel
-import openai as openai_sdk
 
 load_dotenv()
 
+# Store latest metrics per speech_id to compute total latency
+latest_metrics = {}
+
+# ------------- Define Your Agent -------------
 class FinancialAdvisorAssistant(Agent):
     def __init__(self) -> None:
         super().__init__(
@@ -33,19 +39,19 @@ When users ask for loan calculations, use this format:
 Always be professional and emphasize that advice is for informational purposes."""
         )
 
+# ------------- Loan Payment Logic -------------
 def calculate_loan_payment(principal: float, annual_rate: float, years: int) -> str:
-    """Calculate monthly loan payment - simple function"""
     monthly_rate = annual_rate / 100 / 12
     num_payments = years * 12
-    
+
     if monthly_rate == 0:
         monthly_payment = principal / num_payments
     else:
         monthly_payment = principal * (monthly_rate * (1 + monthly_rate)**num_payments) / ((1 + monthly_rate)**num_payments - 1)
-    
+
     total_payment = monthly_payment * num_payments
     total_interest = total_payment - principal
-    
+
     return f"""Loan Payment Calculation:
 • Principal: ${principal:,.2f}
 • Interest Rate: {annual_rate}% annually
@@ -54,20 +60,36 @@ def calculate_loan_payment(principal: float, annual_rate: float, years: int) -> 
 • Total Payment: ${total_payment:,.2f}
 • Total Interest: ${total_interest:,.2f}"""
 
+# ------------- Metrics Logging to CSV -------------
+def log_latency_metrics(speech_id, eou_delay, ttft, ttfb):
+    total_latency = eou_delay + ttft + ttfb
+    filename = "metrics_log.csv"
+    file_exists = os.path.isfile(filename)
+    with open(filename, mode="a", newline="") as file:
+        writer = csv.writer(file)
+        if not file_exists:
+            writer.writerow(["Timestamp", "Speech ID", "EOU Delay", "TTFT", "TTFB", "Total Latency"])
+        writer.writerow([
+            datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            speech_id,
+            f"{eou_delay:.3f}",
+            f"{ttft:.3f}",
+            f"{ttfb:.3f}",
+            f"{total_latency:.3f}"
+        ])
+
+# ------------- Entrypoint -------------
 async def entrypoint(ctx: agents.JobContext):
-    # Create OpenAI client using Groq's endpoint
     groq_client = AsyncOpenAI(
         base_url="https://api.groq.com/openai/v1",
         api_key=os.environ.get("GROQ_API_KEY")
     )
 
-    # Simple LLM setup without functions parameter
     llm = livekit_openai.LLM(
         model="llama-3.3-70b-versatile",
         client=groq_client,
     )
 
-    # Set up the agent session
     session = AgentSession(
         stt=deepgram.STT(model="nova-3", language="multi"),
         llm=llm,
@@ -79,6 +101,46 @@ async def entrypoint(ctx: agents.JobContext):
         turn_detection=MultilingualModel(),
     )
 
+    # Handle metrics_collected event
+    @session.on("metrics_collected")
+    def on_metrics(ev: MetricsCollectedEvent):
+        m = ev.metrics
+        speech_id = getattr(m, "speech_id", None)
+        if speech_id is None:
+            return
+
+        # Store relevant metrics
+        if isinstance(m, metrics.EOUMetrics):
+            latest_metrics.setdefault(speech_id, {})["eou"] = m.end_of_utterance_delay
+        elif isinstance(m, metrics.LLMMetrics):
+            latest_metrics.setdefault(speech_id, {})["ttft"] = m.ttft
+        elif isinstance(m, metrics.TTSMetrics):
+            latest_metrics.setdefault(speech_id, {})["ttfb"] = m.ttfb
+
+        # Once we have all three, log them
+        metric_set = latest_metrics.get(speech_id, {})
+        if all(k in metric_set for k in ("eou", "ttft", "ttfb")):
+            log_latency_metrics(
+                speech_id,
+                metric_set["eou"],
+                metric_set["ttft"],
+                metric_set["ttfb"]
+            )
+            del latest_metrics[speech_id]
+
+    # Optional: usage summary at shutdown
+    usage_collector = metrics.UsageCollector()
+
+    @session.on("metrics_collected")
+    def on_usage(ev: MetricsCollectedEvent):
+        usage_collector.collect(ev.metrics)
+
+    async def log_usage():
+        summary = usage_collector.get_summary()
+        print(f"Session Usage Summary: {summary}")
+
+    ctx.add_shutdown_callback(log_usage)
+
     await ctx.connect()
 
     await session.start(
@@ -89,12 +151,12 @@ async def entrypoint(ctx: agents.JobContext):
         ),
     )
 
-    # Initial greeting
     await session.generate_reply(
         instructions="""Greet the user as FinanceBot and say: 
         'Hello! I'm FinanceBot, your personal financial advisor AI. I can help you with loan calculations, investment planning, and budgeting advice. What financial question can I help you with today?'"""
     )
 
+# ------------- CLI Run -------------
 if __name__ == "__main__":
     agents.cli.run_app(
         agents.WorkerOptions(entrypoint_fnc=entrypoint)
