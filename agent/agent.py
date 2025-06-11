@@ -18,49 +18,42 @@ from livekit.plugins.turn_detector.multilingual import MultilingualModel
 
 load_dotenv()
 
-# Store latest metrics per speech_id to compute total latency
 latest_metrics = {}
 
-# ------------- Define Your Agent -------------
 class FinancialAdvisorAssistant(Agent):
     def __init__(self) -> None:
         super().__init__(
-            instructions="""You are FinanceBot, an expert financial advisor AI assistant. 
+            instructions="""
+You are FinanceBot, a professional AI financial advisor. All your answers should never include signs or operators, no asterics, etc. Just use multiplied by etc
 
-Your specialty is helping people with:
-- Loan and mortgage calculations
-- Investment and retirement planning 
-- Budget analysis and financial advice
-- Explaining complex financial concepts simply
+Your main responsibilities:
+- If the user asks for **loan or mortgage calculations**, respond with:  
+  "I'll calculate that for you. For a loan of $X at Y% for Z years..."  
+  Then perform the calculation and present:
+  • Monthly Payment  
+  • Total Payment  
+  • Total Interest
 
-When users ask for loan calculations, use this format:
-"I'll calculate that for you. For a loan of $X at Y% for Z years..."
+- If the user asks about **investment planning**, respond with:  
+  "To plan investments, I consider goals, risk tolerance, and time horizon. Here's a basic strategy..."
 
-Always be professional and emphasize that advice is for informational purposes."""
+- If the user asks about **retirement planning**, respond with:  
+  "Retirement planning involves estimating post-retirement needs, savings goals, and contribution schedules..."
+
+- If the user asks for **budgeting or financial advice**, respond with:  
+  "Effective budgeting follows the 50/30/20 rule. Here's a simple breakdown..."
+
+- For all answers:
+  • Be concise and professional  
+  • Make it clear the advice is informational, not financial counsel  
+  • Use formatting like bullet points or line breaks for clarity  
+  • Never ask for personal data
+
+If the question doesn't fall into those categories, answer normally using your financial knowledge.
+"""
         )
 
-# ------------- Loan Payment Logic -------------
-def calculate_loan_payment(principal: float, annual_rate: float, years: int) -> str:
-    monthly_rate = annual_rate / 100 / 12
-    num_payments = years * 12
 
-    if monthly_rate == 0:
-        monthly_payment = principal / num_payments
-    else:
-        monthly_payment = principal * (monthly_rate * (1 + monthly_rate)**num_payments) / ((1 + monthly_rate)**num_payments - 1)
-
-    total_payment = monthly_payment * num_payments
-    total_interest = total_payment - principal
-
-    return f"""Loan Payment Calculation:
-• Principal: ${principal:,.2f}
-• Interest Rate: {annual_rate}% annually
-• Term: {years} years
-• Monthly Payment: ${monthly_payment:,.2f}
-• Total Payment: ${total_payment:,.2f}
-• Total Interest: ${total_interest:,.2f}"""
-
-# ------------- Metrics Logging to CSV -------------
 def log_latency_metrics(speech_id, eou_delay, ttft, ttfb):
     total_latency = eou_delay + ttft + ttfb
     filename = "metrics_log.csv"
@@ -156,8 +149,19 @@ async def entrypoint(ctx: agents.JobContext):
         'Hello! I'm FinanceBot, your personal financial advisor AI. I can help you with loan calculations, investment planning, and budgeting advice. What financial question can I help you with today?'"""
     )
 
-# ------------- CLI Run -------------
+from livekit.agents import Worker
+
+async def run_agent():
+    options = agents.WorkerOptions(entrypoint_fnc=entrypoint)
+    worker = Worker(options)
+    await worker.run()
+
+
+# agent.py
+
+# Do not run agent CLI app automatically if imported elsewhere
 if __name__ == "__main__":
     agents.cli.run_app(
         agents.WorkerOptions(entrypoint_fnc=entrypoint)
     )
+
